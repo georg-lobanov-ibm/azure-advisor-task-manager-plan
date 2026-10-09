@@ -21,7 +21,7 @@ A Python app built on the Claude Agent SDK (`claude_agent_sdk`) with two MCP ser
 Flow:
 
 ```
-fetch Advisor findings -> normalize -> dedupe against Jira -> decide
+fetch Advisor findings -> drop exempted -> normalize -> dedupe against Jira -> decide
   -> structured proposal -> human approval -> create/sync in Jira -> audit log
 ```
 
@@ -38,7 +38,8 @@ Encoded in the system prompt (`prompts/system.md`) and in deterministic rules (`
 
 - **Inputs per finding:** category, impact (High/Medium/Low), resource, subscription, recommendation ID, potential savings.
 - **Create** when impact is at or above the configured threshold and no open ticket exists.
-- **Skip** when the finding is suppressed or postponed in Advisor, below the threshold, or a duplicate.
+- **Exempted findings are excluded entirely.** If a rule or recommendation is exempted/suppressed in Azure Advisor, it must not appear in the findings at all: not as a proposal, not as a `skip` row, not in reports. This is enforced by a deterministic filter in `policy.py` right after fetch, before the model sees any data, so it never depends on the prompt.
+- **Skip** when the finding is postponed in Advisor, below the threshold, or a duplicate.
 - **Group** by recommendation type per subscription or resource group to avoid ticket floods.
 - **Sync:** if a finding disappears from Advisor, propose closing its ticket. If severity changes, propose an update.
 - **Output:** a structured proposal (JSON schema) with action, rationale, and Jira fields (project, issue type, summary, description, labels, priority).
@@ -87,7 +88,8 @@ tests/
 
 ## 10. Testing and evaluation
 
-- Recorded Advisor payload fixtures.
+- Recorded Advisor payload fixtures, including exempted/suppressed findings.
+- A test that exempted findings never reach the agent or any output.
 - A mocked Jira MCP server.
 - A golden-set eval of decisions (create/skip/update/close).
 - Dedupe and idempotency tests (double run produces no new tickets).
@@ -96,6 +98,8 @@ tests/
 ## 11. Risks and open questions
 
 - Maturity and tool naming of the Azure and Jira MCP servers.
+- How exemptions are exposed by the Azure MCP server (Advisor suppressions vs. Azure Policy exemptions), and whether the Advisor API already omits them or the agent must filter.
+- What to do with an existing Jira ticket whose finding later becomes exempted (leave alone, or propose closing).
 - Single vs. multiple subscriptions in scope.
 - Jira project, issue type and custom field mapping.
 - Approval channel beyond the CLI.
