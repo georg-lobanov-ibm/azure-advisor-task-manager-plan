@@ -58,7 +58,26 @@ Three different identifiers are in play, with different stability:
 
 **Conclusion for the plan:** don't use the per-finding `id`/`name` GUID as the database primary key — treat it as a transient reference useful only for logging/debugging a single run. Use the composite key **`(recommendationTypeId, resourceId)`** instead. This is stable: if an issue is fixed and later reappears on the same resource for the same rule, it will produce a new per-finding GUID but the same `(recommendationTypeId, resourceId)` pair, so the database still recognizes it as "the same finding" and finds the existing Jira link.
 
-This should replace the single `advisor_id` field proposed in PLAN.md section 2 with a composite key. Suggested follow-up: update PLAN.md sections 2, 5, and 11 accordingly (not done in this document — flagging for the next PR).
+This replaces the single `advisor_id` field proposed in PLAN.md section 2 with a composite key. **Applied**: PLAN.md sections 2, 5, 10 and 11 now use `(recommendation_type_id, resource_id)` as the database key instead of a single `advisor_id`.
+
+## Direct MCP connection from the agent
+
+The agent connects to the Azure MCP Server **directly as an MCP client** — not by shelling out to the `azmcp` CLI per call. Microsoft documents no remotely-hosted Azure MCP Server endpoint: every connection method (NuGet `Azure.Mcp`, NPM `@azure/mcp`, PyPI `msmcp-azure`, Docker, IDE integrations) spawns the server as a **local subprocess** that talks MCP over stdio.
+
+Microsoft's own Python sample (`get-started/languages/python`) does exactly this with the standard `mcp` package:
+
+```python
+from mcp import StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+server_params = StdioServerParameters(
+    command="npx",
+    args=["-y", "@azure/mcp@latest", "server", "start", "--namespace", "advisor", "--read-only"],
+    env=None,
+)
+```
+
+The Claude Agent SDK's `mcp_servers` option on `ClaudeAgentOptions` wraps this same pattern — it spawns the subprocess and speaks MCP to it directly, identically for the Jira MCP server. See PLAN.md section 3 for how this is wired into the agent, including tool naming (`mcp__<server_name>__<tool_name>`) and the approval gate for Jira writes.
 
 ## Auth and access
 
