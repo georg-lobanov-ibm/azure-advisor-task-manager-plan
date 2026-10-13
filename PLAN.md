@@ -26,8 +26,8 @@ fetch Advisor findings -> drop exempted -> normalize -> query db for known mappi
   -> decide -> structured proposal -> human approval -> create/sync in Jira and db -> audit log
 ```
 
-**Database**: stores the bidirectional link between Advisor recommendation IDs and Jira story/issue keys, plus metadata:
-- `advisor_id` (PK): stable identifier of the recommendation
+**Database**: stores the bidirectional link between Advisor recommendations and Jira story/issue keys, plus metadata:
+- `recommendation_type_id` + `resource_id` (composite PK): the stable identifiers of the recommendation rule and the Azure resource it applies to. The per-finding `id`/`name` GUID Advisor returns is not stable across its recalculation cycles, so it is not used as a key (see `docs/azure-advisor-mcp-server.md`).
 - `jira_issue_key`: e.g., "PROJ-123"
 - `created_at`: when the link was first recorded
 - `status`: "open", "closed", "paused"
@@ -37,10 +37,11 @@ fetch Advisor findings -> drop exempted -> normalize -> query db for known mappi
 
 ## 3. MCP integration
 
-- **Server choice is an open item.** Phase 0 verifies the tool names exposed by the current Azure MCP server (Advisor) and the Atlassian/Jira MCP server.
-- Restrict the agent with `allowed_tools`: Azure tools are read-only, and Jira read/search tools are allowed.
-- Jira write tools (`create_issue`, `update_issue`, transitions) are blocked until approval. The gate is a `can_use_tool` permission callback or a PreToolUse hook.
-- **Auth:** managed identity or a service principal with the Reader role for Azure, and a Jira API token. Secrets come from env vars or a secret store, never from the repo.
+- **The agent connects to both MCP servers directly as an MCP client** — via the Claude Agent SDK's `mcp_servers` option, not by shelling out to a CLI. Each server is a locally-spawned stdio subprocess the SDK launches and talks MCP to directly: `npx -y @azure/mcp@latest server start --namespace advisor --read-only` for Azure Advisor; the equivalent launch command for the Jira/Atlassian MCP server is still TBD (Phase 0).
+- MCP tools are named `mcp__<server_name>__<tool_name>` (e.g. `mcp__azure_advisor__recommendation_list`). `allowed_tools` wildcards only match after a literal `mcp__<server>__` prefix — a bare `mcp__*` or `*` is ignored, so each server's allowed tools must be listed or scoped per-server explicitly.
+- Restrict the agent with `allowed_tools`: Azure Advisor tools are read-only, and Jira read/search tools are allowed.
+- Jira write tools (`create_issue`, `update_issue`, transitions) are blocked until approval. The gate must be a **PreToolUse hook** (matching `^mcp__jira__`, returning an `ask`/`defer` permission decision) rather than a `can_use_tool` callback alone: hooks run before `allowed_tools` is evaluated, so the gate can't be silently bypassed by an allow-list entry; `can_use_tool` is skipped entirely for any tool `allowed_tools` already approves.
+- **Auth:** managed identity or a service principal with the Reader role for Azure — resolved via the standard Azure credential chain in the environment the subprocess inherits — and a Jira API token. Secrets come from env vars or a secret store, never from the repo.
 
 ## 4. Decision policy
 
@@ -56,7 +57,7 @@ Encoded in the system prompt (`prompts/system.md`) and in deterministic rules (`
 
 ## 5. Dedupe and idempotency
 
-Query the database for an existing mapping by `advisor_id` before proposing a new ticket. If a mapping exists, fetch the Jira issue key and link directly. Also store the `advisor-id:<hash>` label or custom field on the Jira ticket for manual cross-reference. Re-running the agent must never produce a second ticket for the same finding.
+Query the database for an existing mapping by the composite key `(recommendation_type_id, resource_id)` before proposing a new ticket. If a mapping exists, fetch the Jira issue key and link directly. Also store a label or custom field derived from that composite key (e.g. `advisor-key:<hash of the pair>`) on the Jira ticket for manual cross-reference. Re-running the agent must never produce a second ticket for the same finding.
 
 The database is the source of truth for the mapping; Jira labels are redundant but help with manual tracing.
 
@@ -110,12 +111,11 @@ migrations/   # database schema versions
 - A golden-set eval of decisions (create/skip/update/close).
 - Dedupe and idempotency tests (double run produces no new tickets, database state is consistent).
 - A prompt-injection test using a malicious recommendation text.
-- Database tests: schema creation, migration, mapping CRUD operations, querying by `advisor_id` and `jira_issue_key`.
+- Database tests: schema creation, migration, mapping CRUD operations, querying by `(recommendation_type_id, resource_id)` and `jira_issue_key`.
 
 ## 11. Risks and open questions
 
-- **[CRITICAL]** **Advisor ID stability**: Is `advisor_id` stable across runs for the same recommendation rule + resource? If you fix an issue and the problem reappears, does it return the same ID? This determines the database primary key: if IDs are unstable, we use `(recommendation_rule, resource_id, subscription_id)` instead. Must verify in Phase 0.
-- Maturity and tool naming of the Azure and Jira MCP servers.
+- Maturity and tool naming of the Jira MCP server (the Azure Advisor side is resolved — see section 3 and `docs/azure-advisor-mcp-server.md`).
 - How exemptions are exposed by the Azure MCP server (Advisor suppressions vs. Azure Policy exemptions), and whether the Advisor API already omits them or the agent must filter.
 - What to do with an existing Jira ticket whose finding later becomes exempted (leave alone, or propose closing).
 - Single vs. multiple subscriptions in scope.
