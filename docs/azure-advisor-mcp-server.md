@@ -83,21 +83,21 @@ The Claude Agent SDK's `mcp_servers` option on `ClaudeAgentOptions` wraps this s
 
 Uses the caller's Azure credential via Azure RBAC — no separate server credential to manage. A **Reader** role at the subscription (or management group) scope is enough for every tool above.
 
-**The default credential chain, and its exact order, matter for this project** because the subprocess's environment is whatever the agent's process passes down — not an interactively-logged-in developer machine. Per the server's own [Authentication guide](https://github.com/microsoft/mcp/blob/main/docs/Authentication.md), for local/stdio use (how this project connects — see "Direct MCP connection from the agent" above) the server tries credential sources in this order, first success wins:
+**The default credential chain, and its exact order, matter for this project** because the subprocess's environment is whatever the agent's process passes down — not an interactively-logged-in developer machine. This chain is a fixed sequence hardcoded in the Azure MCP Server binary itself (via the Azure Identity SDK) — it's the same seven steps regardless of what spawned the stdio subprocess, whether that's VS Code, the `azmcp` CLI, or (as in this project) the Claude Agent SDK; the server has no notion of "which client is driving me." Per the server's own [Authentication guide](https://github.com/microsoft/mcp/blob/main/docs/Authentication.md), for local/stdio use (how this project connects — see "Direct MCP connection from the agent" above) the server tries credential sources in this order, first success wins:
 
 1. `EnvironmentCredential` — the service-principal env vars: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
-2. `VisualStudioCredential`
-3. `VisualStudioCodeCredential`
+2. `VisualStudioCredential` — **irrelevant here**: checks for a cached Visual Studio sign-in; this project never runs under Visual Studio, so this step always fails and falls through
+3. `VisualStudioCodeCredential` — **irrelevant here**: checks VS Code's Azure Account extension cache; not applicable to a Claude Agent SDK-launched subprocess, so this always fails and falls through
 4. `AzureCliCredential` (`az login`)
-5. `AzurePowerShellCredential`
-6. `AzureDeveloperCliCredential`
-7. `InteractiveBrowserCredential`
+5. `AzurePowerShellCredential` — **irrelevant here**: checks an Azure PowerShell sign-in cache; this project doesn't use PowerShell, so this always fails and falls through
+6. `AzureDeveloperCliCredential` — **irrelevant here**: checks an `azd` (Azure Developer CLI) sign-in cache; this project doesn't use `azd`, so this always fails and falls through
+7. `InteractiveBrowserCredential` — **irrelevant here**: opens an interactive browser login prompt, which has nothing to attach to in a non-interactive agent run, so this always fails too
 
-(A broker check — OS broker/WAM on Windows — runs before this chain if broker mode is enabled.)
+(A broker check — OS broker/WAM on Windows — runs before this chain if broker mode is enabled; also not applicable to this project's non-interactive, typically Linux-hosted runs.)
 
-Three things this corrects against an easy but wrong assumption:
+In practice, only steps 1 and 4 can ever succeed for this project — the rest are dead weight that cost a few failed lookups per run but otherwise don't matter. Three things worth correcting against an easy but wrong assumption:
 
-- **Environment variables win, not `az login`.** If the agent's process happens to inherit both a service-principal env var set and an ambient CLI login, the env vars are used — `az login` is fourth in line, after the Visual Studio and VS Code credential providers (which will no-op in a headless agent run, but are still checked first).
+- **Environment variables win, not `az login`.** If the agent's process happens to inherit both a service-principal env var set and an ambient CLI login, the env vars are used — `az login` (step 4) only gets a chance if step 1 fails.
 - **Managed identity is not in this default chain at all.** It only appears if `AZURE_TOKEN_CREDENTIALS=prod` is explicitly set, which *restricts* the chain to "Environment, Azure Pipelines (when configured), Workload Identity, and Managed Identity credentials only" — the right setting for a hosted/scheduled run (PLAN.md section 9, Phase 4), where the agent should not fall through to a developer-tool credential by accident.
 - **No automatic tenant-ID fallback is documented.** For the service-principal path, `AZURE_TENANT_ID` must be set explicitly; the server does not infer it from an `az account set` context the way one might expect.
 
