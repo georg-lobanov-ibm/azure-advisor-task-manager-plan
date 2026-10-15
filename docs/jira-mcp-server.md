@@ -62,6 +62,33 @@ Every mutating tool's own doc string carries the note *"This is a write tool. Di
 
 Source: [mcp-atlassian tools reference](https://mcp-atlassian.soomiles.com/docs/tools-reference), [jira-issues](https://mcp-atlassian.soomiles.com/docs/tools/jira-issues).
 
+## Auth and access
+
+Unlike the Azure MCP Server (which uses the Azure Identity SDK's multi-step credential chain), `mcp-atlassian` uses straightforward environment variables. No fallback chain — you explicitly configure one authentication method per deployment, depending on your Jira deployment type and auth policy.
+
+**For Jira Cloud with API token:**
+- `JIRA_URL` — Cloud site URL, e.g. `https://my-company.atlassian.net`
+- `JIRA_USERNAME` — email address registered on the Jira instance
+- `JIRA_API_TOKEN` — an API token generated from the user account (Settings → Security → API tokens)
+
+**For Jira Server or Data Center with Personal Access Token (Server/DC v8.14+):**
+- `JIRA_URL` — on-premises server URL, e.g. `https://jira.internal.company.com:8080`
+- `JIRA_PERSONAL_TOKEN` — a PAT generated from the user account
+
+**For Jira Server/DC with mutual TLS (client certificate):**
+- `JIRA_URL`
+- `JIRA_CLIENT_CERT` — path to the client certificate file
+- `JIRA_CLIENT_KEY` — path to the private key file
+- `ALLOW_GLOBAL_CRED_FALLBACK=true` (permits certificate credentials to authenticate requests lacking an `Authorization` header)
+
+**For Jira Cloud with OAuth 2.0 (not recommended for this project):**
+- Multiple `ATLASSIAN_OAUTH_*` environment variables (see [mcp-atlassian authentication docs](https://mcp-atlassian.soomiles.com/docs/authentication) for the full set)
+- OAuth introduces the same interactive-consent problem as the official Atlassian Remote MCP Server; avoided here in favor of API token/PAT (which fits a non-interactive agent without extra hand-waving to an external consent step).
+
+**For this project:** set `JIRA_URL`, `JIRA_USERNAME`, and `JIRA_API_TOKEN` in the subprocess's environment if targeting Jira Cloud; use `JIRA_URL` and `JIRA_PERSONAL_TOKEN` if targeting Server/DC. All three are passed down from the agent's environment (via PLAN.md section 3's `env` dict on the `mcp_servers` config) — they must never be committed to the repo, per CLAUDE.md's "secrets from env vars or a secret store, never the repo" rule.
+
+Source: [mcp-atlassian authentication docs](https://mcp-atlassian.soomiles.com/docs/authentication).
+
 ## Scoping and the read-only/write split
 
 `mcp-atlassian` has direct analogues to the Azure MCP server's `--read-only`/`--namespace` flags, set as environment variables on the subprocess:
