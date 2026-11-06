@@ -11,7 +11,7 @@ Build a Claude agent that reads Azure Advisor findings through an MCP server and
 
 ## 2. Architecture
 
-A Python app built on the Claude Agent SDK (`claude_agent_sdk`) with two MCP servers attached and a database to track Advisor-to-Jira mappings:
+A Python app built on the `anthropic` SDK's tool runner (`client.beta.messages.tool_runner`), with two MCP servers attached through the `mcp` package's stdio clients and a database to track Advisor-to-Jira mappings:
 
 | Server | Purpose | Access |
 |---|---|---|
@@ -37,11 +37,15 @@ fetch Advisor findings -> drop exempted -> normalize -> query db for known mappi
 
 ## 3. MCP integration
 
-- **The agent connects to both MCP servers directly as an MCP client** — via the Claude Agent SDK's `mcp_servers` option, not by shelling out to a CLI. Each server is a locally-spawned stdio subprocess the SDK launches and talks MCP to directly: `npx -y @azure/mcp@latest server start --namespace advisor --read-only` for Azure Advisor; the equivalent launch command for the Jira/Atlassian MCP server is still TBD (Phase 0).
-- MCP tools are named `mcp__<server_name>__<tool_name>` (e.g. `mcp__azure_advisor__recommendation_list`). `allowed_tools` wildcards only match after a literal `mcp__<server>__` prefix — a bare `mcp__*` or `*` is ignored, so each server's allowed tools must be listed or scoped per-server explicitly.
-- Restrict the agent with `allowed_tools`: Azure Advisor tools are read-only, and Jira read/search tools are allowed.
-- Jira write tools (`create_issue`, `update_issue`, transitions) are blocked until approval. The gate must be a **PreToolUse hook** (matching `^mcp__jira__`, returning an `ask`/`defer` permission decision) rather than a `can_use_tool` callback alone: hooks run before `allowed_tools` is evaluated, so the gate can't be silently bypassed by an allow-list entry; `can_use_tool` is skipped entirely for any tool `allowed_tools` already approves.
-- **Auth:** managed identity or a service principal with the Reader role for Azure — resolved via the standard Azure credential chain in the environment the subprocess inherits — and a Jira API token. Secrets come from env vars or a secret store, never from the repo.
+- **The agent connects to both MCP servers directly as an MCP client** — through the `mcp` package's stdio client, not by shelling out to a CLI. Each server is a locally-spawned stdio subprocess that the agent starts and talks MCP to directly:
+  - Azure Advisor: `uvx --from msmcp-azure==3.0.0 azmcp server start --namespace advisor --read-only` (the PyPI package, version pinned and bumped deliberately). Node.js and npm are not needed; `uv` is the only prerequisite, and the Jira server needs it too.
+  - Jira: `uvx mcp-atlassian` (see `docs/jira-mcp-server.md`).
+- **Runtime:** the `anthropic` SDK's tool runner (`client.beta.messages.tool_runner`) runs the model-and-tools loop, and each MCP tool is turned into a runner tool. The model sees each tool under the name its server reports, with no `mcp__<server>__` prefix; a tool name that two servers both report stops startup. The agent has no built-in file, shell or web tools: its only tools are the Azure and Jira MCP tools.
+- **Azure tools:** in namespace mode the server exposes four MCP tools: `advisor` (a router that takes a sub-command), `group_list`, `group_resource_list` and `subscription_list`. The Azure tools run without approval. The 3.0.0 server registers an `advisor_recommendation_update` command that changes a recommendation's state; the server source indicates `--read-only` removes it, but this is **unverified** against a live tool list (see `docs/azure-advisor-mcp-server.md`).
+- **Approval gate for Jira writes:** every tool is wrapped in an `ApprovalGatedTool` (`mcp_tools.py`) that asks for a terminal "yes" before the call reaches the server. Only `jira_search`, `jira_get_issue` and `jira_get_transitions` run without approval; every other Jira tool, including any tool the code does not list, needs approval (the gate fails closed). If stdin or stderr is not a terminal, gated calls are denied and the model is told. The gate is in the agent's own tool wrapper, not in a server setting, so a server option or a tool allow-list cannot turn it off.
+- **Server environment:** each server gets a minimal environment (`HOME`, `PATH`, proxy and CA-certificate settings, `TERM` and similar) plus only the variables it needs: the set `AZURE_*` variables for Azure, the chosen `JIRA_*` variables for Jira. `ANTHROPIC_API_KEY` never reaches a server.
+- **Auth:** the Azure identity needs the Reader role (a managed identity, a service principal, or, in development, the developer's own `az login` session), and Jira needs an API token (Cloud: `JIRA_URL`, `JIRA_USERNAME`, `JIRA_API_TOKEN`; Server/Data Center: `JIRA_URL`, `JIRA_PERSONAL_TOKEN`). `AZURE_TOKEN_CREDENTIALS` defaults to `AzureCliCredential` (`az login`), pinned on purpose: in Azure MCP Server 3.0.0, leaving it unset makes the server build an interactive browser credential, which on Linux can hang every Azure tool call with no error. For a service principal set `EnvironmentCredential` with `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET`; for a managed identity set `prod`. Do not use `dev` or an empty value. Secrets come from env vars or a secret store, never from the repo.
+- **Status:** the Azure server was confirmed to start and answer with the pinned credential. The agent's wiring against the Anthropic API, and the Jira server, have not been verified live.
 
 ## 4. Decision policy
 
@@ -80,7 +84,10 @@ The database is the source of truth for the mapping; Jira labels are redundant b
 ```
 src/advisor_agent/
   main.py       # entrypoint / CLI
-  agent.py      # Agent SDK setup, MCP config, permission gate
+  agent.py      # tool-runner setup, conversation session, composes the MCP server configs
+  mcp_tools.py  # MCP stdio client helpers, approval-gated tool wrapper, server environment
+  azure_mcp.py  # Azure Advisor MCP server config
+  jira_mcp.py   # Jira MCP server config, read-tool list
   policy.py     # thresholds, grouping, dedupe rules
   approval.py   # approval UI and rejection store
   audit.py      # JSONL audit log
@@ -115,7 +122,8 @@ migrations/   # database schema versions
 
 ## 11. Risks and open questions
 
-- Maturity and tool naming of the Jira MCP server (the Azure Advisor side is resolved — see section 3 and `docs/azure-advisor-mcp-server.md`).
+- Maturity of the Jira MCP server, and whether its tool names (the read-tool list in particular) hold against a live server. Azure Advisor side: the server starts and answers with the pinned credential (see section 3 and `docs/azure-advisor-mcp-server.md`); whether `--read-only` removes `advisor_recommendation_update`, and the agent's wiring against the Anthropic API, are not verified live.
+- How the per-call terminal gate described in section 3 (`mcp_tools.py`) relates to the proposal-level approval flow in section 6 (`approval.py`).
 - How exemptions are exposed by the Azure MCP server (Advisor suppressions vs. Azure Policy exemptions), and whether the Advisor API already omits them or the agent must filter.
 - What to do with an existing Jira ticket whose finding later becomes exempted (leave alone, or propose closing).
 - Single vs. multiple subscriptions in scope.
