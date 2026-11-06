@@ -21,24 +21,24 @@ Sources: [`atlassian/atlassian-mcp-server` README](https://github.com/atlassian/
 
 ## Why `mcp-atlassian`, self-hosted via stdio
 
-The deciding factor isn't the bigger tool catalog or Atlassian's own hosting — it's authentication fit. The official server's primary auth is **OAuth 2.1, an interactive user-consent flow**. The Claude Agent SDK does **not** drive that flow itself: per its [MCP docs](https://code.claude.com/docs/en/agent-sdk/mcp), an unauthenticated remote server just comes up as `needs-auth`, and someone has to complete OAuth out-of-band and hand the SDK a cached bearer token. That's a poor fit for an unattended, scheduled agent (PLAN.md section 9, Phase 4).
+The deciding factor isn't the bigger tool catalog or Atlassian's own hosting — it's authentication fit. The official server's primary auth is **OAuth 2.1, an interactive user-consent flow**. This agent does **not** drive that flow: it connects to its MCP servers with the `mcp` package's stdio client, which starts a local subprocess and speaks MCP over its stdin/stdout, and it has no interactive consent step. The official server would need an HTTP connection plus a consent step completed out-of-band by a person; the agent has neither. That's a poor fit for an unattended, scheduled agent (PLAN.md section 9, Phase 4).
 
 `mcp-atlassian` instead authenticates with a plain **API token or Personal Access Token**, supplied via an environment variable — no interactive step, and it fits the same "secrets from env vars or a secret store, never the repo" rule PLAN.md section 3 already states for Azure. It also runs as a **local stdio subprocess by default**, exactly the pattern this project already uses for the Azure MCP server:
 
 ```python
-# Same shape as the Azure Advisor server in PLAN.md section 3 — no "type" key means stdio.
-"jira": {
-    "command": "uvx",
-    "args": ["mcp-atlassian"],
-    "env": {
+# Same shape as the Azure Advisor server in PLAN.md section 3: the `mcp` package's stdio parameters.
+StdioServerParameters(
+    command="uvx",
+    args=["mcp-atlassian"],
+    env={
         "JIRA_URL": "https://<your-site>.atlassian.net",
         "JIRA_USERNAME": "<email>",
         "JIRA_API_TOKEN": "<token, from env/secret store>",
     },
-}
+)
 ```
 
-(Docker is the other supported way to run it; both are still a local subprocess the Agent SDK spawns and speaks MCP to directly — not a CLI shell-out.)
+(Docker is the other supported way to run it; both are still a local subprocess the agent spawns and speaks MCP to directly — not a CLI shell-out. The project launches `uvx mcp-atlassian` without a version pin, unlike the Azure server, which is pinned; whether to pin it is not decided here.)
 
 ## Tools exposed
 
@@ -58,7 +58,7 @@ The Jira-relevant subset (Confluence tools exist in the same server but are out 
 
 Every mutating tool's own doc string carries the note *"This is a write tool. Disabled when `READ_ONLY_MODE=true`."* — there's no separate "destructive" tier the way Azure MCP annotates `Destructive: true/false`; `jira_delete_issue` is just another write tool, gated the same as `jira_create_issue`.
 
-**This matters for PLAN.md section 3's PreToolUse hook.** That section's `^mcp__jira__` regex and the idea of blocking "`create_issue`, `update_issue`, transitions" by name were written before the real tool names were known. The actual names are `jira_create_issue`, `jira_update_issue`, `jira_transition_issue`, `jira_add_comment`/`jira_edit_comment`, and `jira_delete_issue` — all under the `mcp__jira__` prefix once attached via the Agent SDK, so the existing `^mcp__jira__` hook matcher still works, but a hook that tries to allow-list read-only Jira tools by exact name should use these names, not the placeholder ones.
+**This matters for PLAN.md section 3's approval gate.** The earlier plan blocked "`create_issue`, `update_issue`, transitions" by name, before the real tool names were known. The actual names are `jira_create_issue`, `jira_update_issue`, `jira_transition_issue`, `jira_add_comment`/`jira_edit_comment`, and `jira_delete_issue`. The agent gives the model each tool under the name the server reports, with no `mcp__jira__` prefix, so these are the names the model sees and the names the gate sees. The gate works from a read list (`jira_search`, `jira_get_issue`, `jira_get_transitions`): those three run without approval and every other Jira tool needs a terminal "yes", so the list names the tools that are allowed through, not the ones that are blocked. The read list has not been checked against a live Jira server, and the project's code says to revisit it once connected.
 
 Source: [mcp-atlassian tools reference](https://mcp-atlassian.soomiles.com/docs/tools-reference), [jira-issues](https://mcp-atlassian.soomiles.com/docs/tools/jira-issues).
 
@@ -85,7 +85,7 @@ Unlike the Azure MCP Server (which uses the Azure Identity SDK's multi-step cred
 - Multiple `ATLASSIAN_OAUTH_*` environment variables (see [mcp-atlassian authentication docs](https://mcp-atlassian.soomiles.com/docs/authentication) for the full set)
 - OAuth introduces the same interactive-consent problem as the official Atlassian Remote MCP Server; avoided here in favor of API token/PAT (which fits a non-interactive agent without extra hand-waving to an external consent step).
 
-**For this project:** set `JIRA_URL`, `JIRA_USERNAME`, and `JIRA_API_TOKEN` in the subprocess's environment if targeting Jira Cloud; use `JIRA_URL` and `JIRA_PERSONAL_TOKEN` if targeting Server/DC. All three are passed down from the agent's environment (via PLAN.md section 3's `env` dict on the `mcp_servers` config) — they must never be committed to the repo, per CLAUDE.md's "secrets from env vars or a secret store, never the repo" rule.
+**For this project:** set `JIRA_URL`, `JIRA_USERNAME`, and `JIRA_API_TOKEN` in the subprocess's environment if targeting Jira Cloud; use `JIRA_URL` and `JIRA_PERSONAL_TOKEN` if targeting Server/DC. The agent reads them from its own environment and passes only the chosen `JIRA_*` variables to the server, on top of a minimal environment (PLAN.md section 3); `ANTHROPIC_API_KEY` and the `AZURE_*` variables do not reach it. They must never be committed to the repo, per CLAUDE.md's "secrets from env vars or a secret store, never the repo" rule.
 
 Source: [mcp-atlassian authentication docs](https://mcp-atlassian.soomiles.com/docs/authentication).
 
@@ -93,11 +93,11 @@ Source: [mcp-atlassian authentication docs](https://mcp-atlassian.soomiles.com/d
 
 `mcp-atlassian` has direct analogues to the Azure MCP server's `--read-only`/`--namespace` flags, set as environment variables on the subprocess:
 
-- `READ_ONLY_MODE=true` — disables every write tool server-wide. Useful as defense-in-depth, matching how PLAN.md section 3 already treats Azure's `--read-only` ("redundant ... but useful as defense-in-depth").
+- `READ_ONLY_MODE=true` — disables every write tool server-wide. Useful as defense-in-depth, in the same way `docs/azure-advisor-mcp-server.md` treats Azure's `--read-only`: it is a server-side layer in addition to the agent's own gate, not a replacement for it.
 - `JIRA_PROJECTS_FILTER` — restrict the server to specific project keys.
 - `TOOLSETS` / `ENABLED_TOOLS` — allow-list by tool group or exact tool name (closest equivalent of `--namespace`/`--tool`).
 
-None of these replace the human-approval gate. PLAN.md section 3's **PreToolUse hook** on `^mcp__jira__` is still what makes the approval step unbypassable (hooks run before `allowed_tools` evaluation); `READ_ONLY_MODE` and the filters above are an *additional*, server-side layer — the same "both, not either" relationship Azure's `--read-only` has with `allowed_tools` in this project.
+None of these replace the human-approval gate. In the agent, each Jira tool is wrapped by `ApprovalGatedTool` (`mcp_tools.py`), which asks for a terminal "yes" before the call reaches the server. Only `jira_search`, `jira_get_issue` and `jira_get_transitions` run without approval; every other Jira tool, including ones the code does not list, needs it (the gate fails closed). If stdin or stderr is not a terminal, gated calls are denied and the model is told. Because the gate sits in the agent, no server setting can bypass it. `READ_ONLY_MODE` and the filters above would be an *additional*, server-side layer. The project's launch code does not set them today; whether to add them is not decided here.
 
 Source: [mcp-atlassian configuration docs](https://mcp-atlassian.soomiles.com/docs/configuration).
 
@@ -117,8 +117,8 @@ Source: [support.atlassian.com — Rovo MCP server settings](https://support.atl
 
 ## Open items this doesn't resolve
 
-- PLAN.md section 3 still has the Jira launch command as "TBD (Phase 0)" and uses placeholder tool names (`create_issue`, `update_issue`, "transitions"). This doc resolves both — the launch command above and the real `jira_*` names — but applying that fix to PLAN.md itself is a follow-up PR, the same way this doc's Advisor counterpart deferred its own PLAN.md fix.
-- PLAN.md section 11's "Maturity and tool naming of the Jira MCP server" open question can likely be closed the same way the Advisor-side `[CRITICAL]` item was, once the above fix lands.
+- The Jira server has not been verified live: the launch command, the `jira_*` tool names and the read list (`jira_search`, `jira_get_issue`, `jira_get_transitions`) come from the `mcp-atlassian` documentation and the project's code, not from a run against a Jira site. PLAN.md section 11 keeps this as an open item.
+- Whether `uvx mcp-atlassian` should be pinned to a version the way the Azure server is. The project does not pin it today.
 - Jira project, issue type, and custom field mapping (PLAN.md section 11) is unaffected by this research and remains open.
 
 ## Sources
@@ -130,4 +130,4 @@ Source: [support.atlassian.com — Rovo MCP server settings](https://support.atl
 - Atlassian support: [Supported tools](https://support.atlassian.com/atlassian-ai-gateway/docs/supported-tools/) · [Control Atlassian Rovo MCP server settings](https://support.atlassian.com/security-and-access-policies/docs/control-atlassian-rovo-mcp-server-settings/)
 - [`sooperset/mcp-atlassian`](https://github.com/sooperset/mcp-atlassian) and its docs: [tools reference](https://mcp-atlassian.soomiles.com/docs/tools-reference), [authentication](https://mcp-atlassian.soomiles.com/docs/authentication), [configuration](https://mcp-atlassian.soomiles.com/docs/configuration), [HTTP transport](https://mcp-atlassian.soomiles.com/docs/http-transport), [compatibility](https://mcp-atlassian.soomiles.com/docs/compatibility)
 - [GitHub Security Advisories — `sooperset/mcp-atlassian`](https://github.com/sooperset/mcp-atlassian/security/advisories)
-- Claude Agent SDK: [MCP docs](https://code.claude.com/docs/en/agent-sdk/mcp)
+- Anthropic Python SDK: [`anthropics/anthropic-sdk-python`](https://github.com/anthropics/anthropic-sdk-python)
