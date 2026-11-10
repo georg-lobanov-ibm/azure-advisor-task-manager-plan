@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "/home/georg/Projects/georg-lobanov-ibm/azure-advisor-task-manager"
+    ],
+    "deny": [
+      "Write(/home/georg/Projects/georg-lobanov-ibm/azure-advisor-task-manager/**)",
+      "Edit(/home/georg/Projects/georg-lobanov-ibm/azure-advisor-task-manager/**)",
+      "Edit(.claude/settings.json)"
+    ],
+    "allow": [
+    ]
+  }
+}
+
